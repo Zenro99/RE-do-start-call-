@@ -1,0 +1,7 @@
+Engine: Godot 3.6, GLES2 renderer. GDScript 3.x syntax ONLY.
+Use: onready var, export var, yield, connect("signal", self, "method"), KinematicBody2D, rand_range.
+Never use: @onready, @export, await, CharacterBody2D, signal.connect(callable), Godot 4 APIs.
+Build UI in code (add_child with Control nodes). Do not hand-write .tscn files except Main.tscn.
+No art assets. Use colored rectangles, ColorRect, Label, Button, and _draw().
+Only edit files the current task requires. Do not rename or delete existing functions.
+After each task, list the files you changed and how to test.
