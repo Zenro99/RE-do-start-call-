@@ -6,7 +6,7 @@ const M = preload("res://scripts/Mods.gd")
 
 const ACTIONS = ["NERF BLASTER", "BASEBALL THROW", "LIGHTSABER THRUST", "JUICE BOX", "WAIT"]
 const KINDS = ["blaster", "baseball", "saber", "item", "wait"]
-const PHASE_NAMES = ["TELEGRAPH", "MOVE", "ENEMY MOVE", "RESOLVE", "TICK", "CHECK"]
+const PHASE_NAMES = ["TELEGRAPH", "MOVE", "ENEMY MOVE", "RESOLVE", "TICK", "CHECK", "CUTSCENE"]
 
 # Right panel geometry (panel starts at C.PANEL_X = 600)
 const PX = 616
@@ -33,6 +33,7 @@ const SPRITE_ENEMY = [
 	"orRddRro",
 	".oooooo.",
 ]
+
 # The Melted Hanger: a coat hanger left out in the sun. Hook on top, molten drips below.
 const SPRITE_HANGER = [
 	"...oo...",
@@ -45,6 +46,29 @@ const SPRITE_HANGER = [
 	"o.d.md.o",
 ]
 
+# The Crushed Lightbulb: caved-in glass, a filament that will not go out, screw base.
+const SPRITE_BULB = [
+	"o..oo..o",
+	".oy.yyo.",
+	"oywwyyyo",
+	".oywyyo.",
+	"..oyyo..",
+	"..oggo..",
+	".oggggo.",
+	"..oooo..",
+]
+
+# the boss intro, played with the same banner system as the fight itself.
+# SPACE / ENTER / ESC / click skips it.
+const CUTSCENE = [
+	{"dur": 1.4, "text": "The hallway goes dark.", "col": "dim", "shake": 0.0, "flash": 0.0},
+	{"dur": 1.6, "text": "Something down here is still plugged in.", "col": "accent", "shake": 0.0, "flash": 0.25},
+	{"dur": 1.6, "text": "Glass crunches under your sneakers.", "col": "text", "shake": 3.0, "flash": 0.0},
+	{"dur": 1.7, "text": "It remembers being whole.", "col": "crush", "shake": 6.0, "flash": 0.5},
+	{"dur": 2.4, "text": "THE CRUSHED LIGHTBULB", "col": "bulb", "shake": 12.0, "flash": 1.0, "reveal": true},
+	{"dur": 1.3, "text": "DON'T BLINK.", "col": "crush", "shake": 0.0, "flash": 0.3},
+]
+
 # ---------------- state ----------------
 var player_pos = Vector2(3, 6)
 var enemy_pos = Vector2(3, 0)
@@ -55,8 +79,8 @@ var enemy_hp = C.ENEMY_HP
 var round_num = 1
 var phase = C.Phase.TELEGRAPH
 var sub_state = "busy"           # move, action, target, busy
-var lunge_tiles = []             # tiles the Pipe slides through (touching you = KO)
-var swing_tiles = []             # tiles the Pipe's swing hits (10-25 damage)
+var lunge_tiles = []             # tiles the enemy slides through (touching you = KO)
+var swing_tiles = []             # tiles its attack hits
 var effects = {}                 # Vector2 -> {"type": String, "turns": int}
 var queued_attack = {}
 var item_used = false
@@ -68,16 +92,7 @@ var move_tiles = []
 var target_tiles = []
 var result = ""
 
-# which enemy this battle is against ("pipe" or "hanger"), set by Main before the screen is added
-# smooth HP bars, attack cooldowns, "can't use that" flash, banner timer
-var player_hp_vis = 100.0
-var enemy_hp_vis = 100.0
-var cooldowns = {"blaster": 0, "baseball": 0, "saber": 0}
-var deny_index = -1
-var deny_t = 0.0
-var banner_t = 0.0
-var f12 = null
-
+# which enemy this battle is against ("pipe", "hanger", "bulb"), set by Main before we are added
 var enemy_type = "pipe"
 var run = {}                     # carried between battles: hp, max_hp, coins, mods
 var mods = []                    # ids of the modifiers you own (see Mods.gd)
@@ -96,9 +111,7 @@ var last_pattern = ""
 var enraged = false
 var pattern_label = ""
 var enemy_dir = Vector2(0, 1)
-var mods_label = null
-var pal_hanger = {}
-var swing_groups = []            # [{"kind": "charge"/"sweep"/"drip"/"slash"/"splat"/"sag", "tiles": [...], "center": Vector2}]
+var swing_groups = []            # [{"kind": ..., "tiles": [...], "center": Vector2}]
 var strike_mult = 1.0            # damage multiplier of the current enemy attack
 var last_pipe_variant = ""
 var last_move = Vector2(0, 0)    # your last walk, the Pipe remembers your habits
@@ -109,6 +122,23 @@ var trail = []
 var idle_t = 0.0
 var crit_t = 0.0
 var crit_tile = Vector2(0, 0)
+
+# the boss: two separate dashes, and its intro cinematic
+var lunge_legs = []              # [[leg 1 tiles], [leg 2 tiles]]
+var last_bulb_pattern = ""
+var cutscene_i = -1              # -1 = no cutscene running
+var cutscene_t = 0.0
+var cutscene_dark = 0.0
+var cutscene_flash = 0.0
+var boss_revealed = true
+
+# smooth HP bars, attack cooldowns, "can't use that" flash, banner timer
+var player_hp_vis = 100.0
+var enemy_hp_vis = 100.0
+var cooldowns = {"blaster": 0, "baseball": 0, "saber": 0}
+var deny_index = -1
+var deny_t = 0.0
+var banner_t = 0.0
 
 # timers / effects
 var next_step = ""
@@ -131,20 +161,27 @@ var banner_color = Color(1, 1, 1)
 
 # ui
 var f8 = null
+var f12 = null
 var f16 = null
 var pal_player = {}
 var pal_enemy = {}
+var pal_hanger = {}
+var pal_bulb = {}
+var mods_label = null
 var player_label = null
 var enemy_label = null
 var round_label = null
 var phase_label = null
 var hint_label = null
 var action_buttons = []
+
 var DIRS = [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]
 var DIRS8 = [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1), Vector2(1, 1), Vector2(1, -1), Vector2(-1, 1), Vector2(-1, -1)]
 var SPECKS = [Vector2(10, 12), Vector2(44, 20), Vector2(24, 46), Vector2(54, 52)]
 
+
 # ---------------- setup ----------------
+
 func _ready():
 	randomize()
 	f8 = S.make_font(8)
@@ -156,9 +193,12 @@ func _ready():
 		f12 = get_font("font", "Label")
 	if f16 == null:
 		f16 = get_font("font", "Label")
+
 	pal_player = {"o": Color(0.04, 0.06, 0.14), "b": C.PLAYER, "l": Color(0.6, 0.8, 1.0), "w": Color(1, 1, 1)}
 	pal_enemy = {"o": Color(0.16, 0.08, 0.05), "s": Color(0.82, 0.86, 0.92), "g": Color(0.55, 0.58, 0.65), "r": C.RUST, "R": Color(1.0, 0.55, 0.2), "e": Color(1.0, 0.9, 0.2), "d": Color(0.10, 0.03, 0.03)}
 	pal_hanger = {"o": Color(0.10, 0.08, 0.10), "g": Color(0.66, 0.69, 0.76), "m": Color(1.0, 0.55, 0.15), "d": Color(1.0, 0.85, 0.30)}
+	pal_bulb = {"o": Color(0.12, 0.12, 0.16), "y": C.BULB_GLASS, "w": Color(1, 1, 1), "g": Color(0.55, 0.57, 0.62)}
+
 	# pick up what you carried over from the last battle (hp, coins, modifiers)
 	var par = get_parent()
 	var carried = null
@@ -168,18 +208,21 @@ func _ready():
 		run = carried
 	else:
 		run = {"hp": C.PLAYER_HP, "max_hp": C.PLAYER_HP, "coins": 0, "mods": []}
-	mods = run["mods"]
-	max_hp = run["max_hp"]
-	player_hp = run["hp"]
-	if enemy_type == "hanger":
-		enemy_max = C.HANGER_HP
-	else:
-		enemy_max = C.ENEMY_HP
+	mods = run.get("mods", [])
+	max_hp = run.get("max_hp", C.PLAYER_HP)
+	player_hp = run.get("hp", C.PLAYER_HP)
+
+	enemy_max = enemy_max_hp()
 	enemy_hp = enemy_max
 	player_hp_vis = float(player_hp)
 	enemy_hp_vis = float(enemy_hp)
 	build_ui()
-	start_round()
+
+	if enemy_type == "bulb" and C.BULB_CUTSCENE:
+		start_cutscene()
+	else:
+		start_round()
+
 
 func make_label(text, y, font, color):
 	var l = Label.new()
@@ -190,6 +233,7 @@ func make_label(text, y, font, color):
 	l.add_color_override("font_color", color)
 	add_child(l)
 	return l
+
 
 func build_ui():
 	# The side panel is drawn in _draw() (see draw_panel). The only real buttons are
@@ -213,29 +257,38 @@ func build_ui():
 		add_child(lose_btn)
 	update_ui()
 
+
 # ---------------- helpers ----------------
+
 func in_grid(t):
 	return t.x >= 0 and t.x < C.GRID and t.y >= 0 and t.y < C.GRID
+
 
 func tile_px(t):
 	return C.GRID_OFFSET + t * C.TILE
 
+
 func tile_center(t):
 	return tile_px(t) + Vector2(C.TILE * 0.5, C.TILE * 0.5)
+
 
 func tile_rect(t):
 	return Rect2(tile_px(t), Vector2(C.TILE, C.TILE))
 
+
 func alpha(c, a):
 	return Color(c.r, c.g, c.b, a)
+
 
 func effect_at(pos):
 	if effects.has(pos):
 		return effects[pos]["type"]
 	return ""
 
+
 func add_effect(pos, type, turns):
 	effects[pos] = {"type": type, "turns": turns}
+
 
 func effect_color(type):
 	if type == "rust":
@@ -244,11 +297,15 @@ func effect_color(type):
 		return C.SLOW
 	if type == "goo":
 		return C.GOO
+	if type == "glass":
+		return C.GLASS_COL
 	return C.BURN
+
 
 func set_hint(text):
 	# (narration removed on purpose: feedback comes from banners, floating numbers and effects)
 	pass
+
 
 # a short title card over the board (attack names, VICTORY, ...); fades out by itself
 func set_banner(text, color, dur = 1.3):
@@ -256,41 +313,93 @@ func set_banner(text, color, dur = 1.3):
 	banner_color = color
 	banner_t = dur
 
+
 func enemy_short():
 	if enemy_type == "hanger":
 		return "HANGER"
+	if enemy_type == "bulb":
+		return "BULB"
 	return "PIPE"
+
 
 func enemy_name():
 	return "THE " + enemy_short()
 
+
 func enemy_title():
 	if enemy_type == "hanger":
 		return "The Hanger"
+	if enemy_type == "bulb":
+		return "The Crushed Lightbulb"
 	return "The Pipe"
+
 
 func enemy_color():
 	if enemy_type == "hanger":
 		return C.DANGER
+	if enemy_type == "bulb":
+		return C.BULB_COL
 	return C.ENEMY
+
+
+func enemy_full_name():
+	if enemy_type == "hanger":
+		return "MELTED HANGER"
+	if enemy_type == "bulb":
+		return "CRUSHED LIGHTBULB"
+	return "RUSTED PIPE"
+
+
+func enemy_max_hp():
+	if enemy_type == "hanger":
+		return C.HANGER_HP
+	if enemy_type == "bulb":
+		return C.BULB_HP
+	return C.ENEMY_HP
+
+
+func enemy_hit_color():
+	if enemy_type == "hanger":
+		return C.GOO
+	if enemy_type == "bulb":
+		return C.BULB_COL
+	return C.RUST
+
+
+# what the enemy smears on the floor as it slides
+func floor_effect():
+	if enemy_type == "hanger":
+		return "goo"
+	if enemy_type == "bulb":
+		return "glass"
+	return "rust"
+
 
 func hit_min():
 	if enemy_type == "hanger":
 		return C.HANGER_HIT_MIN
+	if enemy_type == "bulb":
+		return C.BULB_HIT_MIN
 	return C.ENEMY_HIT_MIN
+
 
 func hit_max():
 	if enemy_type == "hanger":
 		return C.HANGER_HIT_MAX
+	if enemy_type == "bulb":
+		return C.BULB_HIT_MAX
 	return C.ENEMY_HIT_MAX
+
 
 func has_mod(id):
 	return mods.has(id)
+
 
 # slow tiles (dart foam) and goo (Hanger drips) both slow whoever stands on them
 func is_slow(pos):
 	var e = effect_at(pos)
 	return e == "slow" or e == "goo"
+
 
 func player_steps():
 	var steps = C.PLAYER_MOVE
@@ -300,27 +409,35 @@ func player_steps():
 		steps += 1
 	return steps
 
+
 func telegraph_time():
 	var t = C.TELEGRAPH_TIME
 	if enemy_type == "hanger":
 		t = C.HANGER_TELEGRAPH
+	if enemy_type == "bulb":
+		t = C.BULB_TELEGRAPH
 	if has_mod("static_trade"):
 		t = t * 0.55
 	return t
+
 
 func schedule(method, delay):
 	next_step = method
 	wait_time = delay
 
+
 func update_ui():
 	update()
+
 
 func refresh_buttons():
 	update()
 
+
 func float_text(text, tile, color, dy = 0):
 	var p = tile_px(tile) + Vector2(C.TILE * 0.5, 20 + dy)
 	floaters.append({"text": text, "pos": p, "t": 0.0, "color": color})
+
 
 func spawn_burst(px, color, count):
 	for i in range(count):
@@ -328,13 +445,17 @@ func spawn_burst(px, color, count):
 		var sp = rand_range(50.0, 170.0)
 		particles.append({"pos": px, "vel": Vector2(cos(ang), sin(ang)) * sp, "t": 0.0, "life": rand_range(0.3, 0.6), "color": color})
 
-# little ambient life: the Pipe steams, the Hanger drips
+
+# little ambient life: the Pipe steams, the Hanger drips, the Bulb sparks
 func spawn_idle():
 	var c = tile_center(enemy_vis)
 	if enemy_type == "hanger":
 		particles.append({"pos": c + Vector2(rand_range(-14, 14), 22), "vel": Vector2(0, 70), "t": 0.0, "life": 0.45, "color": C.GOO})
+	elif enemy_type == "bulb":
+		particles.append({"pos": c + Vector2(rand_range(-14, 14), rand_range(-16, 10)), "vel": Vector2(rand_range(-25, 25), rand_range(-60, -20)), "t": 0.0, "life": 0.45, "color": C.BULB_COL})
 	else:
 		particles.append({"pos": c + Vector2(rand_range(-16, 16), -26), "vel": Vector2(rand_range(-10, 10), -45), "t": 0.0, "life": 0.7, "color": Color(0.75, 0.78, 0.85)})
+
 
 func damage_player(n):
 	player_hp = int(max(0, player_hp - n))
@@ -346,6 +467,7 @@ func damage_player(n):
 	if player_hp <= 0:
 		kill_player()
 	update_ui()
+
 
 func damage_enemy(n, crit = false):
 	enemy_hp = int(max(0, enemy_hp - n))
@@ -361,12 +483,19 @@ func damage_enemy(n, crit = false):
 		set_banner("BULLSEYE!", C.BULLSEYE_COL, 1.0)
 	else:
 		float_text("-" + str(n), enemy_pos, C.TEXT)
-	spawn_burst(tile_center(enemy_pos), enemy_color(), 10)
+		spawn_burst(tile_center(enemy_pos), enemy_color(), 10)
 	if enemy_hp <= 0 and not enemy_dead:
 		enemy_dead = true
 		enemy_dead_t = 0.0
 		spawn_burst(tile_center(enemy_pos), enemy_color(), 26)
+		if enemy_type == "bulb":
+			# the filament finally pops
+			shake = 16.0
+			spawn_burst(tile_center(enemy_pos), Color(1, 1, 1), 40)
+			spawn_burst(tile_center(enemy_pos), C.BULB_GLASS, 24)
+			set_banner("THE LIGHT GOES OUT", C.BULB_COL, 1.6)
 	update_ui()
+
 
 # Only YOUR sprite dies when you lose. The enemy stays on the board.
 func kill_player():
@@ -376,8 +505,10 @@ func kill_player():
 	player_dead_t = 0.0
 	spawn_burst(tile_center(player_pos), C.PLAYER, 26)
 
+
 func kind_name(kind):
 	return ACTIONS[KINDS.find(kind)]
+
 
 func attack_dmg(kind):
 	var base = C.SABER_DMG
@@ -389,12 +520,80 @@ func attack_dmg(kind):
 		base = int(round(base * 1.3))
 	return base
 
+
 func line_range(kind):
 	if kind == "blaster":
 		return C.BLASTER_RANGE
 	return C.SABER_RANGE
 
+
+# ---------------- the boss cinematic ----------------
+
+func in_cutscene():
+	return cutscene_i >= 0
+
+
+func cutscene_color(key):
+	if key == "dim":
+		return C.TEXT_DIM
+	if key == "accent":
+		return C.ACCENT
+	if key == "crush":
+		return C.CRUSH
+	if key == "bulb":
+		return C.BULB_COL
+	return C.TEXT
+
+
+func start_cutscene():
+	phase = C.Phase.CUTSCENE
+	sub_state = "busy"
+	cutscene_i = 0
+	cutscene_t = 0.0
+	cutscene_dark = 0.0
+	cutscene_flash = 0.0
+	boss_revealed = false
+	apply_cutscene_step()
+	update_ui()
+
+
+func apply_cutscene_step():
+	var d = CUTSCENE[cutscene_i]
+	set_banner(d["text"], cutscene_color(d["col"]), d["dur"] + 0.25)
+	shake = max(shake, d["shake"])
+	cutscene_flash = max(cutscene_flash, d["flash"])
+	if d.has("reveal"):
+		boss_revealed = true
+		spawn_burst(tile_center(enemy_pos), C.BULB_COL, 40)
+		spawn_burst(tile_center(enemy_pos), Color(1, 1, 1), 20)
+
+
+func tick_cutscene(delta):
+	cutscene_t += delta
+	cutscene_dark = min(1.0, cutscene_dark + delta * 1.6)
+	# sparks raining out of the dark before it shows itself
+	if not boss_revealed and randf() < delta * 16.0:
+		var sx = C.GRID_OFFSET.x + rand_range(0.0, C.GRID * C.TILE)
+		particles.append({"pos": Vector2(sx, C.GRID_OFFSET.y - 10), "vel": Vector2(rand_range(-15, 15), rand_range(90, 190)), "t": 0.0, "life": 0.7, "color": C.BULB_COL})
+	if cutscene_t >= CUTSCENE[cutscene_i]["dur"]:
+		cutscene_i += 1
+		cutscene_t = 0.0
+		if cutscene_i >= CUTSCENE.size():
+			end_cutscene()
+		else:
+			apply_cutscene_step()
+
+
+func end_cutscene():
+	cutscene_i = -1
+	cutscene_dark = 0.0
+	cutscene_flash = 0.0
+	boss_revealed = true
+	start_round()
+
+
 # ---------------- round flow ----------------
+
 func start_round():
 	phase = C.Phase.TELEGRAPH
 	sub_state = "busy"
@@ -406,34 +605,38 @@ func start_round():
 	var tt = telegraph_time()
 	show_lunge_t = tt
 	show_swing_t = tt
-	if enemy_type == "hanger":
-		var title = pattern_label
-		if enraged:
+	var title = pattern_label
+	if enraged:
+		if enemy_type == "hanger":
 			title = "MELTDOWN! " + pattern_label
-		set_banner(title, C.CRUSH, tt + 0.3)
-	else:
-		var ptitle = pattern_label
-		if enraged:
-			ptitle = "ENRAGED! " + pattern_label
-		set_banner(ptitle, C.CRUSH, tt + 0.3)
+		elif enemy_type == "bulb":
+			title = "OVERLOAD! " + pattern_label
+		else:
+			title = "ENRAGED! " + pattern_label
+	set_banner(title, C.CRUSH, tt + 0.3)
 	update_ui()
 	schedule("end_telegraph", tt + 0.1)
+
 
 func compute_enemy_attack():
 	strike_mult = 1.0
 	swing_groups = []
+	lunge_legs = []
 	if enemy_type == "hanger":
 		compute_hanger_attack()
+	elif enemy_type == "bulb":
+		compute_bulb_attack()
 	else:
 		compute_pipe_attack()
 
+
 # The Melted Hanger moves in ALL 8 directions (diagonals too). Each round it:
-#  1. slides 1-2 tiles in one direction (red X, instant KO), usually toward you, sometimes erratically
-#  2. then uses a RANDOM pattern for its orange attack tiles:
-#       DRIP RAIN   - scattered drips, spaced out across the board (they turn to goo afterwards)
-#       SLASH       - a long line past its slide, straight or diagonal
-#       MELT SPLAT  - a 3x3 puddle where you were standing; it sags and rests next round
-#     Below half HP it MELTS DOWN: two patterns at once and no resting.
+# 1. slides 1-2 tiles in one direction (red X, instant KO), usually toward you
+# 2. then uses a RANDOM pattern for its orange attack tiles:
+#    DRIP RAIN   - scattered drips (they turn to goo afterwards)
+#    SLASH       - a long line past its slide, straight or diagonal
+#    MELT SPLAT  - a 3x3 puddle where you were standing; it sags and rests next round
+# Below half HP it MELTS DOWN: two patterns at once and no resting.
 func compute_hanger_attack():
 	enraged = enemy_hp * 2 <= enemy_max
 	var dir = best_dir8()
@@ -451,6 +654,7 @@ func compute_hanger_attack():
 		if not in_grid(t):
 			break
 		lunge_tiles.append(t)
+
 	var patterns = []
 	if last_pattern == "splat" and not enraged:
 		patterns = ["sag"]
@@ -465,6 +669,7 @@ func compute_hanger_attack():
 	last_pattern = "other"
 	if patterns.has("splat"):
 		last_pattern = "splat"
+
 	swing_tiles = []
 	drip_tiles = []
 	var names = []
@@ -498,15 +703,18 @@ func compute_hanger_attack():
 		for t in g:
 			add_unique(swing_tiles, t)
 		swing_groups.append({"kind": p, "tiles": g, "center": center})
+
 	pattern_label = ""
 	for nm in names:
 		if pattern_label != "":
 			pattern_label += " + "
 		pattern_label += nm
+
 	# a tile is either the lethal slide (red) or an attack tile (orange), never both
 	for t in lunge_tiles:
 		unmark(t)
 	ensure_escape()
+
 
 func unmark(t):
 	swing_tiles.erase(t)
@@ -514,9 +722,11 @@ func unmark(t):
 	for g in swing_groups:
 		g["tiles"].erase(t)
 
+
 func add_unique(list, t):
 	if not list.has(t):
 		list.append(t)
+
 
 func pick_pattern():
 	var r = randi() % 100
@@ -526,12 +736,17 @@ func pick_pattern():
 		return "slash"
 	return "splat"
 
+
 # the direction (out of 8) that points most toward the player, staying on the board
 func best_dir8():
-	var d = player_pos - enemy_pos
+	return best_dir8_from(enemy_pos)
+
+
+func best_dir8_from(pos):
+	var d = player_pos - pos
 	var options = []
 	for v in DIRS8:
-		if in_grid(enemy_pos + v):
+		if in_grid(pos + v):
 			options.append(v)
 	if options.empty():
 		return DIRS8[0]
@@ -546,6 +761,27 @@ func best_dir8():
 			best_s = sc
 			best = v
 	return best
+
+
+func rand_dir8_from(pos):
+	var options = []
+	for v in DIRS8:
+		if in_grid(pos + v):
+			options.append(v)
+	if options.empty():
+		return Vector2(0, 1)
+	return options[randi() % options.size()]
+
+
+func slide_tiles(from, dir, n):
+	var out = []
+	for i in range(1, n + 1):
+		var t = from + dir * i
+		if not in_grid(t):
+			break
+		out.append(t)
+	return out
+
 
 # scattered tiles with at least one empty tile between each pair
 func random_drips(n):
@@ -565,6 +801,7 @@ func random_drips(n):
 			tiles.append(t)
 	return tiles
 
+
 # fairness: there is always at least one tile you can reach that is not marked
 func ensure_escape():
 	var reach = reachable_tiles()
@@ -577,6 +814,39 @@ func ensure_escape():
 			cand.append(t)
 	if cand.size() > 0:
 		unmark(cand[randi() % cand.size()])
+
+
+func count_safe(reach):
+	var n = 0
+	for t in reach:
+		if not swing_tiles.has(t) and not lunge_tiles.has(t):
+			n += 1
+	return n
+
+
+func count_safe_from_lunge(reach):
+	var n = 0
+	for t in reach:
+		if not lunge_tiles.has(t):
+			n += 1
+	return n
+
+
+# the boss covers a LOT of floor, so it gets the Pipe's stronger fairness rule:
+# a fixed share of your reachable tiles always stays unmarked
+func trim_swing_for_escape(reach, frac, min_safe):
+	var want = int(max(min_safe, ceil(reach.size() * frac)))
+	var guard = 0
+	while count_safe(reach) < want and guard < 80:
+		guard += 1
+		var cand = []
+		for t in reach:
+			if swing_tiles.has(t):
+				cand.append(t)
+		if cand.empty():
+			return
+		unmark(cand[randi() % cand.size()])
+
 
 func reachable_tiles():
 	var out = []
@@ -596,15 +866,10 @@ func reachable_tiles():
 				queue.append(n)
 	return out
 
+
 # ---------------- THE RUSTED PIPE: a hunter ----------------
-# Every round it builds every attack it could do (2 attacks x 4 directions x every slide length),
-# then scores each one by how much of YOUR possible next positions it covers:
-#   - the tile you are standing on (stand still and you get punished)
-#   - the tiles that are far from it (the retreat tiles)
-#   - the tiles lined up with it (where your blaster wants to be)
-#   - the tile that repeats your last walk (it remembers your habits)
-# It also wants to END its slide close to you, and mixes its two attacks so it is never predictable.
-# Fairness: it will never mark so much that fewer than ~35% of your reachable tiles stay safe.
+# Every round it builds every attack it could do, then scores each one by how much
+# of YOUR possible next positions it covers. It also wants to END its slide close to you.
 func compute_pipe_attack():
 	enraged = enemy_hp * 2 <= enemy_max
 	var reach = reachable_tiles()
@@ -621,6 +886,7 @@ func compute_pipe_attack():
 	var best_score = -99999.0
 	var fallback = null
 	var fallback_safe = -1
+
 	for variant in ["charge", "sweep"]:
 		var max_n = base_charge
 		if variant == "sweep":
@@ -653,6 +919,7 @@ func compute_pipe_attack():
 				if score > best_score:
 					best_score = score
 					best = cand
+
 	if best == null:
 		best = fallback
 	lunge_tiles = best["lunge"]
@@ -665,6 +932,7 @@ func compute_pipe_attack():
 		strike_mult = C.SWEEP_DMG_MULT
 	else:
 		pattern_label = "RUST CHARGE!"
+
 
 # one possible attack, or {} if it does not fit on the board
 func build_pipe_candidate(variant, dir, n):
@@ -701,6 +969,7 @@ func build_pipe_candidate(variant, dir, n):
 		return {}
 	return {"variant": variant, "dir": dir, "lunge": lunge, "swing": swing, "end": end}
 
+
 func pipe_tile_weight(t, habit):
 	var w = 1.0
 	if t == player_pos:
@@ -712,24 +981,145 @@ func pipe_tile_weight(t, habit):
 		w += 1.0
 	return w
 
+
+# ---------------- THE CRUSHED LIGHTBULB: the final boss ----------------
+# It DASHES TWICE. Dash 1 usually comes at you, dash 2 re-aims from where dash 1 stopped.
+# Both slides are lethal (two red X lines). Then the floor blows out where it lands:
+#   SHATTER - a 3x3 blast of glass, and it leaves shards on those tiles
+#   SURGE   - a huge cross of light in all 4 directions
+# Below half HP it OVERLOADS: +1 to both dashes, a longer surge, a spikier shatter.
+# Foam darts still slow it: a slowed bulb only dashes 1 tile per leg.
+func compute_bulb_attack():
+	enraged = enemy_hp * 2 <= enemy_max
+	var reach = reachable_tiles()
+	var extra = 0
+	if enraged:
+		extra = C.BULB_ENRAGE_LUNGE
+	var len1 = C.BULB_LUNGE_1 + extra
+	var len2 = C.BULB_LUNGE_2 + extra
+	if is_slow(enemy_pos):
+		len1 = C.SLOWED_LUNGE
+		len2 = C.SLOWED_LUNGE
+
+	# dash 1
+	var dir1 = best_dir8_from(enemy_pos)
+	if randf() < 0.25:
+		dir1 = rand_dir8_from(enemy_pos)
+	var leg1 = slide_tiles(enemy_pos, dir1, len1)
+	var end1 = enemy_pos
+	if leg1.size() > 0:
+		end1 = leg1[leg1.size() - 1]
+
+	# dash 2, re-aimed from the end of dash 1
+	var dir2 = best_dir8_from(end1)
+	if randf() < 0.35:
+		dir2 = rand_dir8_from(end1)
+	var raw2 = slide_tiles(end1, dir2, len2)
+	# never cross its own trail: the two X lines stay readable
+	var leg2 = []
+	for t in raw2:
+		if t == enemy_pos or leg1.has(t):
+			break
+		leg2.append(t)
+
+	lunge_legs = [leg1, leg2]
+	lunge_tiles = []
+	for t in leg1:
+		add_unique(lunge_tiles, t)
+	for t in leg2:
+		add_unique(lunge_tiles, t)
+
+	# fairness step 1: the lethal path can never swallow EVERY tile you can reach
+	var guard = 0
+	while count_safe_from_lunge(reach) < 1 and guard < 8:
+		guard += 1
+		if lunge_legs[1].size() > 0:
+			lunge_tiles.erase(lunge_legs[1].pop_back())
+		elif lunge_legs[0].size() > 0:
+			lunge_tiles.erase(lunge_legs[0].pop_back())
+		else:
+			break
+
+	var end2 = enemy_pos
+	if lunge_legs[0].size() > 0:
+		end2 = lunge_legs[0][lunge_legs[0].size() - 1]
+	if lunge_legs[1].size() > 0:
+		end2 = lunge_legs[1][lunge_legs[1].size() - 1]
+	enemy_dir = dir2
+	if lunge_legs[1].empty():
+		enemy_dir = dir1
+
+	# pick the blast (it dislikes repeating itself)
+	var kind = "shatter"
+	if randf() < 0.5:
+		kind = "surge"
+	if kind == last_bulb_pattern and randf() < 0.6:
+		if kind == "shatter":
+			kind = "surge"
+		else:
+			kind = "shatter"
+	last_bulb_pattern = kind
+
+	swing_tiles = []
+	drip_tiles = []
+	var g = []
+	if kind == "shatter":
+		pattern_label = "SHATTER!"
+		strike_mult = 1.0
+		for dx in range(-C.BULB_SHATTER_R, C.BULB_SHATTER_R + 1):
+			for dy in range(-C.BULB_SHATTER_R, C.BULB_SHATTER_R + 1):
+				var t = end2 + Vector2(dx, dy)
+				if in_grid(t):
+					add_unique(g, t)
+		if enraged:
+			for o in [Vector2(2, 2), Vector2(2, -2), Vector2(-2, 2), Vector2(-2, -2)]:
+				var t2 = end2 + o
+				if in_grid(t2):
+					add_unique(g, t2)
+	else:
+		pattern_label = "SURGE!"
+		strike_mult = C.BULB_SURGE_MULT
+		var arm = C.BULB_SURGE_LEN
+		if enraged:
+			arm = C.BULB_SURGE_LEN_RAGE
+		add_unique(g, end2)
+		for d in DIRS:
+			for i in range(1, arm + 1):
+				var t3 = end2 + d * i
+				if in_grid(t3):
+					add_unique(g, t3)
+
+	swing_tiles = g.duplicate()
+	swing_groups = [{"kind": kind, "tiles": g, "center": end2}]
+
+	# a tile is either the lethal slide (red) or a blast tile (orange), never both
+	for t in lunge_tiles:
+		unmark(t)
+	# fairness step 2: keep a real escape route open
+	trim_swing_for_escape(reach, C.BULB_SAFE_FRAC, C.BULB_MIN_SAFE)
+
+
 func end_telegraph():
 	show_lunge_t = 0.0
 	show_swing_t = 0.0
 	phase = C.Phase.MOVE
 	enter_move()
 
+
 func enter_move():
 	sub_state = "move"
 	calc_move_tiles()
 	cursor = player_pos
-	set_hint("MOVE up to " + str(player_steps()) + " tiles. Click a green tile, or WASD + SPACE. Your own tile = stay put. Stay OFF the Pipe's line!")
+	set_hint("MOVE up to " + str(player_steps()) + " tiles. Click a green tile, or WASD + SPACE. Your own tile = stay put. Stay OFF the enemy's line!")
 	update_ui()
+
 
 func enter_action():
 	sub_state = "action"
 	target_tiles = []
 	set_hint("ACTION: click a toy, or W/S + SPACE, or press 1-5. ESC undoes your move.")
 	update_ui()
+
 
 func calc_move_tiles():
 	move_tiles = []
@@ -748,6 +1138,7 @@ func calc_move_tiles():
 				visited[n] = visited[cur] + 1
 				queue.append(n)
 
+
 func compute_targets(kind):
 	var list = []
 	if kind == "baseball":
@@ -765,6 +1156,7 @@ func compute_targets(kind):
 			if in_grid(t):
 				list.append(t)
 	return list
+
 
 func attack_tiles(kind, target):
 	var tiles = []
@@ -792,10 +1184,8 @@ func attack_tiles(kind, target):
 				tiles.append(t)
 	return tiles
 
+
 # The exact middle of each attack's hitbox. Hit the enemy here for a crit (x1.5).
-#  blaster : the first tile of the line (point blank)
-#  baseball: the center of the plus
-#  saber   : the middle of the center lane (tiles 2-3 of a 4-long thrust)
 func bullseye_tiles(kind, target):
 	var out = []
 	if kind == "baseball":
@@ -816,6 +1206,7 @@ func bullseye_tiles(kind, target):
 			res.append(t)
 	return res
 
+
 func nearest_to_enemy(list):
 	var best = list[0]
 	var best_d = 999
@@ -826,6 +1217,7 @@ func nearest_to_enemy(list):
 			best = t
 	return best
 
+
 func cd_for(kind):
 	if kind == "blaster":
 		return C.BLASTER_CD
@@ -834,6 +1226,7 @@ func cd_for(kind):
 	if kind == "saber":
 		return C.SABER_CD
 	return 0
+
 
 func choose_action(i):
 	action_index = i
@@ -863,13 +1256,8 @@ func choose_action(i):
 		target_tiles = compute_targets(kind)
 		cursor = nearest_to_enemy(target_tiles)
 		sub_state = "target"
-		if kind == "blaster":
-			set_hint("NERF BLASTER (" + str(C.BLASTER_DMG) + " dmg, range " + str(C.BLASTER_RANGE) + "): a line of foam darts. Slows what it hits. Pick a direction. ESC = back.")
-		elif kind == "baseball":
-			set_hint("BASEBALL THROW (" + str(C.BASEBALL_DMG) + " dmg, range " + str(C.BASEBALL_MIN) + "-" + str(C.BASEBALL_RANGE) + "): a lob that lands in a plus shape. Pick any tile. ESC = back.")
-		else:
-			set_hint("LIGHTSABER THRUST (" + str(C.SABER_DMG) + " dmg, " + str(C.SABER_WIDTH) + " wide x " + str(C.SABER_RANGE) + " long): a wide thrust. Burns the floor. Pick a direction. ESC = back.")
 		update_ui()
+
 
 func lock_in():
 	sub_state = "busy"
@@ -878,41 +1266,83 @@ func lock_in():
 	update_ui()
 	schedule("step_enemy_move", 0.35)
 
-# ---- step 3: the enemy lunges along its telegraphed line ----
+
+# ---- step 3: the enemy slides along its telegraphed line ----
+
 func step_enemy_move():
 	phase = C.Phase.ENEMY_MOVE
-	show_lunge_t = 0.7
+	show_lunge_t = 0.8
 	update_ui()
+	if enemy_type == "bulb":
+		bulb_dash_one()
+		return
 	if lunge_tiles.has(player_pos):
-		# it catches you: ONLY your sprite dies, the enemy stays standing on top of the spot
-		enemy_pos = player_pos
-		player_hp = 0
-		player_flash = 0.6
-		shake = 12.0
-		float_text("CRUSHED!", player_pos, C.CRUSH)
-		kill_player()
-		set_hint("CRUSHED! " + enemy_title() + " caught you. If it touches you, it is over.")
-		update_ui()
-		schedule("step_check", 1.4)
+		crush_player()
 		return
 	var cur = enemy_pos
-	var floor_fx = "rust"
+	var floor_fx = floor_effect()
 	enemy_lerp = 22.0
 	if enemy_type == "hanger":
-		floor_fx = "goo"
 		enemy_lerp = 9.0
 	for t in lunge_tiles:
 		add_effect(cur, floor_fx, 3)
 		cur = t
 	enemy_pos = cur
-	if lunge_tiles.size() > 0:
-		if enemy_type == "hanger":
-			set_hint("The Hanger slides across the floor, leaving sticky goo behind. You were out of the way!")
-		else:
-			set_hint("The Pipe slides down its line, leaving rust behind. You were out of the way!")
-	else:
-		set_hint(enemy_title() + " is stuck against the wall.")
 	schedule("step_attack", 0.8)
+
+
+# it catches you: ONLY your sprite dies, the enemy stays standing on top of the spot
+func crush_player():
+	enemy_pos = player_pos
+	player_hp = 0
+	player_flash = 0.6
+	shake = 12.0
+	float_text("CRUSHED!", player_pos, C.CRUSH)
+	spawn_burst(tile_center(player_pos), C.CRUSH, 24)
+	kill_player()
+	set_hint("CRUSHED! " + enemy_title() + " caught you. If it touches you, it is over.")
+	update_ui()
+	schedule("step_check", 1.4)
+
+
+# the boss moves twice: leg 1, a beat, then leg 2
+func bulb_dash_one():
+	do_bulb_dash(0)
+
+
+func bulb_dash_two():
+	do_bulb_dash(1)
+
+
+func do_bulb_dash(i):
+	if i >= lunge_legs.size():
+		schedule("step_attack", 0.2)
+		return
+	var leg = lunge_legs[i]
+	if leg.has(player_pos):
+		crush_player()
+		return
+	if leg.empty():
+		if i == 0:
+			schedule("bulb_dash_two", 0.12)
+		else:
+			schedule("step_attack", 0.2)
+		return
+	var cur = enemy_pos
+	for t in leg:
+		add_effect(cur, "glass", 3)
+		cur = t
+	enemy_pos = cur
+	enemy_lerp = 26.0
+	shake = max(shake, 4.0)
+	spawn_burst(tile_center(enemy_pos), C.BULB_COL, 10)
+	update_ui()
+	if i == 0:
+		schedule("bulb_dash_two", C.BULB_LEG_PAUSE)
+	else:
+		set_banner("IT MOVES AGAIN!", C.BULB_COL, 0.5)
+		schedule("step_attack", 0.5)
+
 
 # ECHO: last round's attack repeats for half damage
 func apply_echo():
@@ -927,7 +1357,9 @@ func apply_echo():
 		damage_enemy(echo["dmg"])
 	echo = {}
 
+
 # ---- step 4a: your toy fires ----
+
 func step_attack():
 	phase = C.Phase.RESOLVE
 	update_ui()
@@ -947,13 +1379,8 @@ func step_attack():
 	attack_anim = {"kind": kind, "from": player_pos, "target": queued_attack["target"], "dir": adir, "tiles": queued_attack["tiles"], "reach": reach}
 	attack_anim_t = 0.0
 	set_banner(kind_name(kind) + "!", C.ACCENT)
-	if kind == "blaster":
-		set_hint("Pew pew pew! Foam darts fly.")
-	elif kind == "baseball":
-		set_hint("Wind up... and the pitch!")
-	else:
-		set_hint("Vwoom! The blade thrusts forward.")
 	schedule("step_attack_hit", 0.45)
+
 
 func spread_effect(tiles, type):
 	for t in tiles:
@@ -961,6 +1388,7 @@ func spread_effect(tiles, type):
 			var n = t + d
 			if in_grid(n) and not tiles.has(n) and n != player_pos:
 				add_effect(n, type, 2)
+
 
 func step_attack_hit():
 	var kind = queued_attack["kind"]
@@ -973,6 +1401,7 @@ func step_attack_hit():
 		attack_flash_color = Color(1, 1, 1)
 	else:
 		attack_flash_color = C.SABER
+
 	var dmg = attack_dmg(kind)
 	var msg = kind_name(kind) + " missed. " + enemy_title() + " was not there."
 	if tiles.has(enemy_pos):
@@ -988,6 +1417,7 @@ func step_attack_hit():
 		msg = kind_name(kind) + " hit for " + str(dmg) + "!"
 	else:
 		streak = 0
+
 	for t in tiles:
 		spawn_burst(tile_center(t), attack_flash_color, 3)
 		if kind == "blaster":
@@ -1009,7 +1439,9 @@ func step_attack_hit():
 	attack_anim = {}
 	schedule("step_strike", 0.9)
 
+
 # ---- step 4b: the enemy's attack tiles land ----
+
 func step_strike():
 	if enemy_hp <= 0:
 		schedule("step_check", 0.3)
@@ -1024,7 +1456,10 @@ func step_strike():
 		groups.append({"kind": g["kind"], "tiles": g["tiles"].duplicate(), "center": g["center"]})
 	enemy_anim = {"main": main_kind, "groups": groups, "origin": enemy_pos, "dir": enemy_dir}
 	enemy_anim_t = 0.0
+	if enemy_type == "bulb":
+		shake = max(shake, 7.0)
 	schedule("step_strike_hit", 0.35)
+
 
 func step_strike_hit():
 	if swing_tiles.has(player_pos):
@@ -1041,28 +1476,35 @@ func step_strike_hit():
 		set_hint(enemy_title() + " droops and rests. Free turn!")
 	else:
 		set_hint(enemy_title() + " attacks empty air.")
+
 	for t in swing_tiles:
 		spawn_burst(tile_center(t), enemy_hit_color(), 3)
 	shake = max(shake, 5.0)
+
 	if enemy_type == "hanger":
 		for t in drip_tiles:
 			add_effect(t, "goo", 2)
+	elif enemy_type == "bulb":
+		# SHATTER leaves broken glass on the floor; SURGE is pure light and leaves nothing
+		if swing_groups.size() > 0 and swing_groups[0]["kind"] == "shatter":
+			for t in swing_tiles:
+				add_effect(t, "glass", 2)
 	schedule("step_tick", 0.6)
 
-func enemy_hit_color():
-	if enemy_type == "hanger":
-		return C.GOO
-	return C.RUST
 
 # ---- step 5: tile effects tick ----
+
 func step_tick():
 	phase = C.Phase.TICK
-	set_hint("Rust and burn hurt whoever stands on them. Slow and goo cut movement and lunges.")
+	set_hint("Rust, glass and burn hurt whoever stands on them. Slow and goo cut movement and lunges.")
 	for pos in effects.keys():
 		var e = effects[pos]
 		if e["type"] == "rust":
 			if pos == player_pos:
 				damage_player(C.RUST_DMG)
+		elif e["type"] == "glass":
+			if pos == player_pos:
+				damage_player(C.GLASS_DMG)
 		elif e["type"] == "burn":
 			if pos == player_pos:
 				damage_player(C.BURN_DMG)
@@ -1083,7 +1525,9 @@ func step_tick():
 	update_ui()
 	schedule("step_check", 0.7)
 
+
 # ---- step 6: win or lose ----
+
 func step_check():
 	phase = C.Phase.CHECK
 	update_ui()
@@ -1098,6 +1542,7 @@ func step_check():
 		round_num += 1
 		start_round()
 
+
 func go_win():
 	result = "win"
 	var par = get_parent()
@@ -1106,11 +1551,14 @@ func go_win():
 	else:
 		par.switch_to("win")
 
+
 func go_lose():
 	result = "lose"
 	get_parent().switch_to("gameover")
 
+
 # ---------------- input ----------------
+
 func _input(event):
 	if event is InputEventKey and event.pressed and not event.echo:
 		handle_key(event.scancode)
@@ -1122,7 +1570,12 @@ func _input(event):
 		elif event.button_index == BUTTON_RIGHT:
 			go_back()
 
+
 func handle_key(code):
+	if in_cutscene():
+		if code == KEY_SPACE or code == KEY_ENTER or code == KEY_ESCAPE:
+			end_cutscene()
+		return
 	var dir = Vector2(0, 0)
 	if code == KEY_W or code == KEY_UP:
 		dir = Vector2(0, -1)
@@ -1142,6 +1595,7 @@ func handle_key(code):
 		if sub_state == "action":
 			choose_action(code - KEY_1)
 
+
 # one step in a direction inside a set of valid tiles (hops over small gaps)
 func step_in(list, from, dir):
 	var n = from + dir
@@ -1151,6 +1605,7 @@ func step_in(list, from, dir):
 	if list.has(n):
 		return n
 	return from
+
 
 func move_cursor(dir):
 	if sub_state == "move":
@@ -1166,6 +1621,7 @@ func move_cursor(dir):
 			var n = player_pos + dir
 			if target_tiles.has(n):
 				cursor = n
+
 
 func confirm():
 	if sub_state == "move":
@@ -1187,7 +1643,10 @@ func confirm():
 		queued_attack = {"kind": current_kind, "target": cursor, "dir": dir, "tiles": attack_tiles(current_kind, cursor)}
 		lock_in()
 
+
 func go_back():
+	if in_cutscene():
+		return
 	if sub_state == "target":
 		target_tiles = []
 		enter_action()
@@ -1196,12 +1655,14 @@ func go_back():
 		last_move = Vector2(0, 0)
 		enter_move()
 
+
 func pos_to_tile(p):
 	var rel = p - C.GRID_OFFSET
 	var t = Vector2(floor(rel.x / C.TILE), floor(rel.y / C.TILE))
 	if in_grid(t):
 		return t
 	return null
+
 
 # Turns a hovered/clicked tile into a valid target for the current state (or null).
 func resolve_target(t):
@@ -1234,13 +1695,17 @@ func resolve_target(t):
 			return t
 	return null
 
+
 func menu_index_at(p):
 	for i in range(ACTIONS.size()):
 		if menu_rect(i).has_point(p):
 			return i
 	return -1
 
+
 func handle_hover(p):
+	if in_cutscene():
+		return
 	if p.x >= C.PANEL_X:
 		if sub_state == "action":
 			var mi = menu_index_at(p)
@@ -1254,7 +1719,11 @@ func handle_hover(p):
 	if v != null:
 		cursor = v
 
+
 func handle_click(p):
+	if in_cutscene():
+		end_cutscene()
+		return
 	if p.x >= C.PANEL_X:
 		if sub_state == "action":
 			var mi = menu_index_at(p)
@@ -1270,7 +1739,9 @@ func handle_click(p):
 	cursor = v
 	confirm()
 
+
 # ---------------- per-frame ----------------
+
 func _process(delta):
 	anim_t += delta
 	if banner_t > 0.0:
@@ -1295,6 +1766,9 @@ func _process(delta):
 		enemy_dead_t += delta
 	if shake > 0.0:
 		shake = max(0.0, shake - delta * 30.0)
+	if cutscene_flash > 0.0:
+		cutscene_flash = max(0.0, cutscene_flash - delta * 2.2)
+
 	player_vis = player_vis.linear_interpolate(player_pos, min(1.0, delta * 16.0))
 	enemy_vis = enemy_vis.linear_interpolate(enemy_pos, min(1.0, delta * enemy_lerp))
 	if player_vis.distance_to(player_pos) < 0.02:
@@ -1307,7 +1781,7 @@ func _process(delta):
 		enemy_anim_t += delta
 		if enemy_anim_t > 0.75:
 			enemy_anim = {}
-	if enemy_vis != enemy_pos and not enemy_dead:
+	if enemy_vis != enemy_pos and not enemy_dead and boss_revealed:
 		trail.append({"pos": enemy_vis, "t": 0.0})
 	var keep_trail = []
 	for g in trail:
@@ -1315,10 +1789,12 @@ func _process(delta):
 		if g["t"] < 0.35:
 			keep_trail.append(g)
 	trail = keep_trail
+
 	idle_t -= delta
-	if idle_t <= 0.0 and not enemy_dead:
+	if idle_t <= 0.0 and not enemy_dead and boss_revealed:
 		idle_t = 0.2
 		spawn_idle()
+
 	var keep = []
 	for f in floaters:
 		f["t"] += delta * 1.3
@@ -1332,6 +1808,12 @@ func _process(delta):
 		if p["t"] < p["life"]:
 			keep_p.append(p)
 	particles = keep_p
+
+	if in_cutscene():
+		tick_cutscene(delta)
+		update()
+		return
+
 	if next_step != "":
 		wait_time -= delta
 		if wait_time <= 0.0:
@@ -1340,12 +1822,15 @@ func _process(delta):
 			call(m)
 	update()
 
+
 # ---------------- drawing ----------------
+
 func frame(r, color, w):
 	draw_rect(Rect2(r.position.x, r.position.y, r.size.x, w), color)
 	draw_rect(Rect2(r.position.x, r.position.y + r.size.y - w, r.size.x, w), color)
 	draw_rect(Rect2(r.position.x, r.position.y, w, r.size.y), color)
 	draw_rect(Rect2(r.position.x + r.size.x - w, r.position.y, w, r.size.y), color)
+
 
 func _draw():
 	draw_set_transform(Vector2(0, 0), 0, Vector2(1, 1))
@@ -1358,6 +1843,7 @@ func _draw():
 	draw_banner()
 	draw_panel()
 
+
 func glyph_for(kind):
 	if kind == "sweep":
 		return "*"
@@ -1365,7 +1851,12 @@ func glyph_for(kind):
 		return "o"
 	if kind == "splat":
 		return "#"
+	if kind == "shatter":
+		return "#"
+	if kind == "surge":
+		return "+"
 	return "!"
+
 
 func draw_banner():
 	if banner_text == "" or banner_t <= 0.0:
@@ -1377,6 +1868,7 @@ func draw_banner():
 	draw_rect(Rect2(bx - 14, 14, w + 28, 36), Color(0.03, 0.03, 0.06, 0.72 * fade))
 	draw_string(f16, Vector2(bx + 2, 42), banner_text, Color(0, 0, 0, fade))
 	draw_string(f16, Vector2(bx, 40), banner_text, alpha(banner_color, fade))
+
 
 func draw_effect(r, type, turns):
 	var col = effect_color(type)
@@ -1399,6 +1891,12 @@ func draw_effect(r, type, turns):
 		draw_rect(Rect2(p.x + 24, p.y + 26, 30, 18), alpha(C.GOO, 0.9))
 		draw_rect(Rect2(p.x + 40, p.y + 44, 22, 12), alpha(C.GOO, 0.9))
 		draw_rect(Rect2(p.x + 30, p.y + 30, 8, 6), Color(1.0, 0.95, 0.6))
+	elif type == "glass":
+		# splinters of the bulb, standing up out of the floor
+		draw_line(p + Vector2(12, 52), p + Vector2(22, 30), alpha(col, 0.95), 4.0)
+		draw_line(p + Vector2(30, 56), p + Vector2(44, 34), alpha(col, 0.95), 4.0)
+		draw_line(p + Vector2(48, 52), p + Vector2(58, 40), alpha(col, 0.9), 4.0)
+		draw_rect(Rect2(p.x + 26, p.y + 22, 6, 6), Color(1, 1, 1, 0.9))
 	else:
 		# flickering flames
 		for i in range(4):
@@ -1407,6 +1905,7 @@ func draw_effect(r, type, turns):
 			draw_rect(Rect2(fx, p.y + C.TILE - 8 - h, 8, h), alpha(C.BURN, 0.9))
 			draw_rect(Rect2(fx + 2, p.y + C.TILE - 8 - h * 0.5, 4, h * 0.5), alpha(C.ACCENT, 0.9))
 	draw_string(f8, p + Vector2(r.size.x - 14, r.size.y - 6), str(turns), C.TEXT)
+
 
 func draw_board():
 	var gsize = C.GRID * C.TILE
@@ -1431,65 +1930,77 @@ func draw_board():
 	for pos in effects.keys():
 		draw_effect(tile_rect(pos), effects[pos]["type"], effects[pos]["turns"])
 
+	# the lights go out for the boss intro
+	if cutscene_dark > 0.0:
+		var flick = 1.0
+		if int(anim_t * 17.0) % 9 == 0:
+			flick = 0.72
+		draw_rect(Rect2(org.x - 12, org.y - 12, gsize + 24, gsize + 24), Color(0, 0, 0, 0.88 * cutscene_dark * flick))
+
 	# move / target highlights
 	if sub_state == "move":
 		for t in move_tiles:
-			var r = tile_rect(t)
-			draw_rect(r, alpha(C.MOVE_COL, 0.28))
-			frame(r, alpha(C.MOVE_COL, 0.85), 2)
+			var rm = tile_rect(t)
+			draw_rect(rm, alpha(C.MOVE_COL, 0.28))
+			frame(rm, alpha(C.MOVE_COL, 0.85), 2)
 	if sub_state == "target":
 		for t in target_tiles:
-			var r = tile_rect(t)
-			draw_rect(r, alpha(C.TARGET_COL, 0.18))
-			frame(r, alpha(C.TARGET_COL, 0.7), 2)
+			var rt = tile_rect(t)
+			draw_rect(rt, alpha(C.TARGET_COL, 0.18))
+			frame(rt, alpha(C.TARGET_COL, 0.7), 2)
 		for t in attack_tiles(current_kind, cursor):
-			var r = tile_rect(t)
-			draw_rect(r, alpha(C.PREVIEW_COL, 0.5))
-			frame(r, C.PREVIEW_COL, 4)
+			var ra = tile_rect(t)
+			draw_rect(ra, alpha(C.PREVIEW_COL, 0.5))
+			frame(ra, C.PREVIEW_COL, 4)
 		for t in bullseye_tiles(current_kind, cursor):
 			draw_crosshair(tile_center(t), tile_rect(t))
 
-	# the Pipe's attack: lunge (red X) and swing (orange !)
+	# the enemy's attack: lunge (red X) and swing (orange glyph)
 	var pulse = 0.72 + 0.12 * sin(anim_t * 9.0)
 	if show_lunge_t > 0.0:
 		for t in lunge_tiles:
-			var r = tile_rect(t)
-			draw_rect(r, alpha(C.CRUSH, pulse))
-			frame(r, C.CRUSH, 4)
-			draw_string(f16, r.position + Vector2(28, 44), "X", C.TEXT)
+			var rl = tile_rect(t)
+			draw_rect(rl, alpha(C.CRUSH, pulse))
+			frame(rl, C.CRUSH, 4)
+			draw_string(f16, rl.position + Vector2(28, 44), "X", C.TEXT)
 	if show_swing_t > 0.0:
 		if phase == C.Phase.TELEGRAPH or enemy_anim.empty():
 			for g in swing_groups:
 				for t in g["tiles"]:
-					var r = tile_rect(t)
-					draw_rect(r, alpha(C.DANGER, pulse))
-					frame(r, C.DANGER, 4)
-					draw_string(f16, r.position + Vector2(28, 44), glyph_for(g["kind"]), C.BG)
+					var rs = tile_rect(t)
+					draw_rect(rs, alpha(C.DANGER, pulse))
+					frame(rs, C.DANGER, 4)
+					draw_string(f16, rs.position + Vector2(28, 44), glyph_for(g["kind"]), C.BG)
 
 	# attack landing flash
 	if attack_flash_t > 0.0:
 		var a = clamp(attack_flash_t / 0.45, 0.0, 1.0)
 		for t in attack_flash:
-			var r = tile_rect(t)
-			draw_rect(r, alpha(attack_flash_color, 0.7 * a))
-			frame(r, Color(1, 1, 1, a), 4)
+			var rf = tile_rect(t)
+			draw_rect(rf, alpha(attack_flash_color, 0.7 * a))
+			frame(rf, Color(1, 1, 1, a), 4)
 
-	# actors
-	# (you are drawn first, so if the enemy ends up on your tile it stays visible on top)
+	# actors (you are drawn first, so the enemy stays visible on top of you)
 	var espr = SPRITE_ENEMY
 	var epal = pal_enemy
 	if enemy_type == "hanger":
 		espr = SPRITE_HANGER
 		epal = pal_hanger
+	elif enemy_type == "bulb":
+		espr = SPRITE_BULB
+		epal = pal_bulb
 	for g in trail:
-		var a = 1.0 - g["t"] / 0.35
-		draw_rect(tile_rect(g["pos"]).grow(-12), alpha(enemy_hit_color(), 0.4 * a))
+		var ta = 1.0 - g["t"] / 0.35
+		draw_rect(tile_rect(g["pos"]).grow(-12), alpha(enemy_hit_color(), 0.4 * ta))
 	draw_actor(player_vis, SPRITE_PLAYER, pal_player, player_flash > 0.0, 0.0, player_dead, player_dead_t)
-	draw_actor(enemy_vis, espr, epal, enemy_flash > 0.0, 0.5, enemy_dead, enemy_dead_t, enemy_pose())
+	if boss_revealed:
+		draw_actor(enemy_vis, espr, epal, enemy_flash > 0.0, 0.5, enemy_dead, enemy_dead_t, enemy_pose())
 	draw_enemy_anim()
-
-	# toy animations on top of the actors
 	draw_attack_anim()
+
+	# the bulb's blowout whites out the board for a beat
+	if cutscene_flash > 0.0:
+		draw_rect(Rect2(org.x - 12, org.y - 12, gsize + 24, gsize + 24), Color(1, 1, 0.92, 0.55 * cutscene_flash))
 
 	# bullseye ring
 	if crit_t > 0.0:
@@ -1504,17 +2015,18 @@ func draw_board():
 
 	# particles
 	for p in particles:
-		var a = 1.0 - p["t"] / p["life"]
-		draw_rect(Rect2(round(p["pos"].x) - 3, round(p["pos"].y) - 3, 6, 6), alpha(p["color"], a))
+		var pa = 1.0 - p["t"] / p["life"]
+		draw_rect(Rect2(round(p["pos"].x) - 3, round(p["pos"].y) - 3, 6, 6), alpha(p["color"], pa))
 
 	# floating numbers
 	for f in floaters:
-		var a = 1.0 - clamp((f["t"] - 0.6) / 0.4, 0.0, 1.0)
-		var p = f["pos"] + Vector2(0, -round(f["t"] * 36.0))
-		var w = f16.get_string_size(f["text"]).x
-		p.x = round(p.x - w * 0.5)
-		draw_string(f16, p + Vector2(2, 2), f["text"], Color(0, 0, 0, a))
-		draw_string(f16, p, f["text"], alpha(f["color"], a))
+		var fa = 1.0 - clamp((f["t"] - 0.6) / 0.4, 0.0, 1.0)
+		var fp = f["pos"] + Vector2(0, -round(f["t"] * 36.0))
+		var fw = f16.get_string_size(f["text"]).x
+		fp.x = round(fp.x - fw * 0.5)
+		draw_string(f16, fp + Vector2(2, 2), f["text"], Color(0, 0, 0, fa))
+		draw_string(f16, fp, f["text"], alpha(f["color"], fa))
+
 
 func draw_crosshair(c, r):
 	var col = C.BULLSEYE_COL
@@ -1523,6 +2035,7 @@ func draw_crosshair(c, r):
 	frame(r.grow(-6), alpha(col, pulse), 3)
 	draw_rect(Rect2(round(c.x) - 14, round(c.y) - 2, 28, 4), col)
 	draw_rect(Rect2(round(c.x) - 2, round(c.y) - 14, 4, 28), col)
+
 
 func draw_attack_anim():
 	if attack_anim.empty():
@@ -1542,14 +2055,14 @@ func draw_attack_anim():
 				draw_dart(from_c + dir * (34 + p * (full - 34)), dir)
 	elif kind == "baseball":
 		var to_c = tile_center(attack_anim["target"])
-		var p = clamp(t / 0.42, 0.0, 1.0)
-		var ground = from_c.linear_interpolate(to_c, p)
-		var arc = sin(p * PI) * 90.0
-		if p < 1.0:
+		var p2 = clamp(t / 0.42, 0.0, 1.0)
+		var ground = from_c.linear_interpolate(to_c, p2)
+		var arc = sin(p2 * PI) * 90.0
+		if p2 < 1.0:
 			draw_rect(Rect2(round(ground.x) - 8, round(ground.y) + 6, 16, 6), Color(0, 0, 0, 0.4))
 			draw_ball(Vector2(round(ground.x), round(ground.y - arc)))
 	else:
-		var full = attack_anim["reach"] * C.TILE
+		var full2 = attack_anim["reach"] * C.TILE
 		var e = 1.0
 		if t < 0.15:
 			e = t / 0.15
@@ -1560,8 +2073,9 @@ func draw_attack_anim():
 		var half = int(C.SABER_WIDTH / 2)
 		for w in range(-half, half + 1):
 			if in_grid(attack_anim["from"] + perp * w):
-				draw_glow(from_c + perp * w * C.TILE + dir * 26, dir, full * e)
-		draw_blade(from_c + dir * 26, dir, full * e)
+				draw_glow(from_c + perp * w * C.TILE + dir * 26, dir, full2 * e)
+		draw_blade(from_c + dir * 26, dir, full2 * e)
+
 
 func draw_glow(start, dir, blade_len):
 	var sx = round(start.x)
@@ -1573,6 +2087,7 @@ func draw_glow(start, dir, blade_len):
 		var y0 = min(sy, sy + dir.y * blade_len)
 		draw_rect(Rect2(sx - 34, y0, 68, abs(blade_len)), alpha(C.SABER, 0.22))
 
+
 func draw_dart(pos, dir):
 	var px = round(pos.x)
 	var py = round(pos.y)
@@ -1583,11 +2098,13 @@ func draw_dart(pos, dir):
 		draw_rect(Rect2(px - 3, py - 8 - dir.y * 2, 6, 14), C.DART_BODY)
 		draw_rect(Rect2(px - 3, py + dir.y * 8 - 3, 6, 6), C.DART_TIP)
 
+
 func draw_ball(c):
 	draw_rect(Rect2(c.x - 6, c.y - 8, 12, 16), Color(1, 1, 1))
 	draw_rect(Rect2(c.x - 8, c.y - 6, 16, 12), Color(1, 1, 1))
 	draw_rect(Rect2(c.x - 2, c.y - 6, 2, 4), Color(0.9, 0.2, 0.2))
 	draw_rect(Rect2(c.x - 2, c.y + 2, 2, 4), Color(0.9, 0.2, 0.2))
+
 
 func draw_blade(start, dir, blade_len):
 	var sx = round(start.x)
@@ -1605,6 +2122,7 @@ func draw_blade(start, dir, blade_len):
 		draw_rect(Rect2(sx - 3, y0, 6, abs(blade_len)), Color(1, 1, 1))
 		draw_rect(Rect2(sx - 7, sy - dir.y * 14 - 5, 14, 10), Color(0.6, 0.62, 0.7))
 
+
 # how the enemy's body moves: windup before it attacks, a unique motion for each attack
 func enemy_pose():
 	var pose = {"off": Vector2(0, 0), "xs": 1.0, "ys": 1.0, "sway": 0.0}
@@ -1615,15 +2133,26 @@ func enemy_pose():
 		pose["sway"] = 3.0
 		if enraged:
 			pose["sway"] = 5.0
+	elif enemy_type == "bulb":
+		pose["sway"] = 4.0
+		if enraged:
+			pose["sway"] = 7.0
+
 	if phase == C.Phase.TELEGRAPH and show_lunge_t > 0.0:
-		# windup: the Pipe coils back and rattles, the Hanger swings wildly
+		# windup: the Pipe coils back, the Hanger swings, the Bulb buzzes in place
 		var jit = sin(anim_t * 70.0) * 2.0
 		if enemy_type == "hanger":
 			pose["sway"] = 9.0
 			pose["off"] = Vector2(jit, 0)
+		elif enemy_type == "bulb":
+			var bj = sin(anim_t * 85.0) * 3.0
+			pose["off"] = Vector2(bj, bj * 0.5)
+			pose["xs"] = 1.0 + sin(anim_t * 40.0) * 0.08
+			pose["ys"] = 1.0 - sin(anim_t * 40.0) * 0.05
 		else:
 			pose["off"] = Vector2(-d.x * 8 + jit, -d.y * 8)
 			pose["ys"] = 0.92
+
 	if not enemy_anim.empty():
 		var a = enemy_anim_t
 		var k = enemy_anim["main"]
@@ -1641,7 +2170,15 @@ func enemy_pose():
 			pose["xs"] = 1.0 + 0.25 * q
 		elif k == "sag":
 			pose["ys"] = 0.8
+		elif k == "shatter":
+			var qb = sin(clamp(a / 0.3, 0.0, 1.0) * PI)
+			pose["xs"] = 1.0 + 0.3 * qb
+			pose["ys"] = 1.0 + 0.3 * qb
+		elif k == "surge":
+			pose["off"] = Vector2(sin(a * 60.0) * 4.0, 0)
+			pose["ys"] = 1.12
 	return pose
+
 
 func draw_actor(vis, rows, pal, flash, phase_off, dead, dead_t, pose = null):
 	if dead and dead_t > 1.4:
@@ -1679,6 +2216,8 @@ func draw_actor(vis, rows, pal, flash, phase_off, dead, dead_t, pose = null):
 			var ch = row[x]
 			if ch == ".":
 				continue
+			if not pal.has(ch):
+				continue
 			var col = pal[ch]
 			if white:
 				col = Color(1, 1, 1)
@@ -1698,9 +2237,12 @@ func draw_actor(vis, rows, pal, flash, phase_off, dead, dead_t, pose = null):
 			var py = base_y + (y * 8.0 - 64.0) * ys + oy
 			draw_rect(Rect2(round(px), round(py), ceil(8.0 * xs) + 1, ceil(8.0 * ys) + 1), alpha(col, a))
 
+
 # ---------------- each enemy's attack animation ----------------
+
 func reveal(t, delay, dur):
 	return clamp((t - delay) / dur, 0.0, 1.0)
+
 
 func draw_enemy_anim():
 	if enemy_anim.empty():
@@ -1714,7 +2256,7 @@ func draw_enemy_anim():
 		var kind = g["kind"]
 		var tiles = g["tiles"]
 		if kind == "charge":
-			# a rusty bar whips outward from the Pipe, tile by tile, with a white clang edge
+			# a rusty bar whips outward, tile by tile, with a white clang edge
 			for i in range(tiles.size()):
 				var p = reveal(t, i * 0.05, 0.1)
 				if p <= 0.0:
@@ -1728,7 +2270,7 @@ func draw_enemy_anim():
 					draw_rect(Rect2(c.x - 15, c.y - C.TILE * 0.5, 30, w), alpha(C.RUST, 0.95 * fade))
 					draw_rect(Rect2(c.x - 4, c.y - C.TILE * 0.5, 8, w), alpha(Color(1.0, 0.8, 0.5), fade))
 		elif kind == "sweep":
-			# the Pipe spins: an arm whirls around it and each tile of the ring gets smacked in turn
+			# the Pipe spins: an arm whirls around it and smacks each tile of the ring
 			for tl in tiles:
 				var c2 = tile_center(tl)
 				var ang = atan2(c2.y - oc.y, c2.x - oc.x) + PI
@@ -1755,7 +2297,7 @@ func draw_enemy_anim():
 					var sz = 18.0 + 34.0 * sp
 					draw_rect(Rect2(round(c3.x - sz * 0.5), round(c3.y - sz * 0.25), sz, sz * 0.5), alpha(C.GOO, 0.9 * fade))
 		elif kind == "slash":
-			# one bright metal slash, straight or diagonal, from the Hanger through the tiles
+			# one bright metal slash, straight or diagonal
 			if tiles.size() > 0:
 				var last = tile_center(tiles[tiles.size() - 1])
 				var sp2 = reveal(t, 0.0, 0.22)
@@ -1775,6 +2317,55 @@ func draw_enemy_anim():
 					var inset = 4 + (1.0 - p3) * 26.0
 					draw_rect(tile_rect(tl).grow(-inset), alpha(C.GOO, 0.9 * fade))
 					draw_rect(tile_rect(tl).grow(-inset - 14), alpha(Color(1, 0.95, 0.6), 0.8 * fade))
+		elif kind == "shatter":
+			# the bulb bursts: a white core, then glass rings punching outward with splinters
+			var ctr_s = g["center"]
+			var cc_s = tile_center(ctr_s)
+			for tl in tiles:
+				var ring_s = max(abs(tl.x - ctr_s.x), abs(tl.y - ctr_s.y))
+				var p4 = reveal(t, ring_s * 0.09, 0.12)
+				if p4 <= 0.0:
+					continue
+				var inset_s = 4 + (1.0 - p4) * 24.0
+				draw_rect(tile_rect(tl).grow(-inset_s), alpha(C.BULB_COL, 0.85 * fade))
+				draw_rect(tile_rect(tl).grow(-inset_s - 16), alpha(Color(1, 1, 1), 0.8 * fade))
+				var off_s = tile_center(tl) - cc_s
+				if off_s.length() > 1.0:
+					var fly = reveal(t, ring_s * 0.09, 0.3)
+					var pos_s = cc_s + off_s.normalized() * (C.TILE * 0.4 + fly * C.TILE * 0.7)
+					draw_rect(Rect2(round(pos_s.x) - 4, round(pos_s.y) - 4, 8, 8), alpha(C.BULB_GLASS, fade))
+			var core = 1.0 - reveal(t, 0.0, 0.25)
+			if core > 0.0:
+				draw_rect(tile_rect(ctr_s).grow(-6), alpha(Color(1, 1, 1), 0.9 * core))
+		elif kind == "surge":
+			# a cross of raw light fires out of the filament in all four directions
+			var ctr_g = g["center"]
+			var cc_g = tile_center(ctr_g)
+			var grow = reveal(t, 0.0, 0.22)
+			for dd in DIRS:
+				var n = 0
+				for tl in tiles:
+					if dd.x != 0 and tl.y == ctr_g.y and sign(tl.x - ctr_g.x) == dd.x:
+						n += 1
+					elif dd.y != 0 and tl.x == ctr_g.x and sign(tl.y - ctr_g.y) == dd.y:
+						n += 1
+				var arm_len = n * C.TILE * grow
+				if arm_len <= 0.0:
+					continue
+				if dd.x != 0:
+					var x0 = min(cc_g.x, cc_g.x + dd.x * arm_len)
+					draw_rect(Rect2(x0, cc_g.y - 26, arm_len, 52), alpha(C.BULB_COL, 0.45 * fade))
+					draw_rect(Rect2(x0, cc_g.y - 10, arm_len, 20), alpha(Color(1, 1, 1), 0.9 * fade))
+				else:
+					var y0 = min(cc_g.y, cc_g.y + dd.y * arm_len)
+					draw_rect(Rect2(cc_g.x - 26, y0, 52, arm_len), alpha(C.BULB_COL, 0.45 * fade))
+					draw_rect(Rect2(cc_g.x - 10, y0, 20, arm_len), alpha(Color(1, 1, 1), 0.9 * fade))
+			var wash = reveal(t, 0.12, 0.15)
+			if wash > 0.0:
+				for tl in tiles:
+					draw_rect(tile_rect(tl).grow(-10), alpha(C.BULB_COL, 0.35 * fade))
+			draw_rect(tile_rect(ctr_g).grow(-8), alpha(Color(1, 1, 1), 0.85 * fade))
+
 
 func draw_cursor(r, color):
 	var pulse = (int(anim_t * 4.0) % 2) * 3
@@ -1794,12 +2385,14 @@ func draw_cursor(r, color):
 	draw_rect(Rect2(x + w - i - l, y + h - i - t, l, t), color)
 	draw_rect(Rect2(x + w - i - t, y + h - i - l, t, l), color)
 
+
 func hp_color(frac):
 	if frac > 0.5:
 		return C.HP_GOOD
 	if frac > 0.25:
 		return C.HP_MID
 	return C.HP_LOW
+
 
 func draw_hp_bar(x, y, w, h, frac):
 	frac = clamp(frac, 0.0, 1.0)
@@ -1811,37 +2404,37 @@ func draw_hp_bar(x, y, w, h, frac):
 	draw_rect(Rect2(x + 2, y + 2, fw, 3), Color(1, 1, 1, 0.22))
 	frame(Rect2(x, y, w, h), C.BORDER_DIM, 2)
 
+
 func draw_text_right(font, right, y, text, color):
 	var w = font.get_string_size(text).x
 	draw_string(font, Vector2(round(right - w), y), text, color)
+
 
 func draw_card(r, name, hp, hp_max, hp_vis, name_color):
 	draw_rect(r, C.CARD_BG)
 	frame(r, C.BORDER_DIM, 2)
 	draw_string(f12, Vector2(r.position.x + 14, r.position.y + 24), name, name_color)
-	draw_text_right(f12, r.position.x + r.size.x - 14, r.position.y + 24, str(hp) + " / " + str(hp_max), C.TEXT)
+	draw_text_right(f12, r.position.x + r.size.x - 14, r.position.y + 24, str(hp) + "/" + str(hp_max), C.TEXT)
 	draw_hp_bar(r.position.x + 14, r.position.y + 34, r.size.x - 28, 14, hp_vis / float(hp_max))
 
-func enemy_full_name():
-	if enemy_type == "hanger":
-		return "MELTED HANGER"
-	return "RUSTED PIPE"
 
 func menu_rect(i):
 	return Rect2(PX, 252 + i * 56, PW, 50)
+
 
 # what each row of the fight menu shows: name, big stat, small tag, accent color
 func menu_info(i):
 	var kind = KINDS[i]
 	if kind == "blaster":
-		return {"stat": "DMG " + str(attack_dmg(kind)), "tag": "LONG LINE  -  SLOWS", "col": C.DART_TIP}
+		return {"stat": "DMG " + str(attack_dmg(kind)), "tag": "LONG LINE - SLOWS", "col": C.DART_TIP}
 	if kind == "baseball":
-		return {"stat": "DMG " + str(attack_dmg(kind)), "tag": "LOB  -  SPLASH", "col": Color(0.92, 0.94, 1.0)}
+		return {"stat": "DMG " + str(attack_dmg(kind)), "tag": "LOB - SPLASH", "col": Color(0.92, 0.94, 1.0)}
 	if kind == "saber":
-		return {"stat": "DMG " + str(attack_dmg(kind)), "tag": "WIDE  -  BURNS", "col": C.SABER}
+		return {"stat": "DMG " + str(attack_dmg(kind)), "tag": "WIDE - BURNS", "col": C.SABER}
 	if kind == "item":
 		return {"stat": "HEAL " + str(C.ITEM_HEAL), "tag": "ONE PER BATTLE", "col": C.HEAL}
 	return {"stat": "SKIP", "tag": "HOLD POSITION", "col": C.TEXT_DIM}
+
 
 func draw_row(i):
 	var r = menu_rect(i)
@@ -1888,6 +2481,7 @@ func draw_row(i):
 	if state != "":
 		draw_text_right(f8, r.position.x + r.size.x - 12, r.position.y + 40, state, alpha(state_col, fade))
 
+
 func draw_panel():
 	draw_rect(Rect2(C.PANEL_X, 0, C.SCREEN_W - C.PANEL_X, C.SCREEN_H), C.PANEL_BG)
 	draw_rect(Rect2(C.PANEL_X, 0, 4, C.SCREEN_H), C.BORDER_DIM)
@@ -1922,6 +2516,9 @@ func draw_panel():
 	for i in range(ACTIONS.size()):
 		draw_row(i)
 	draw_bullseye_legend()
+	if in_cutscene():
+		draw_string(f8, Vector2(PX, 620), "SPACE OR CLICK: SKIP", C.TEXT_DIM)
+
 
 # tells you where each attack's gold bullseye is
 func draw_bullseye_legend():
@@ -1943,5 +2540,5 @@ func draw_bullseye_legend():
 	draw_rect(Rect2(PX, y, PW, 56), C.CARD_BG)
 	frame(Rect2(PX, y, PW, 56), alpha(C.BULLSEYE_COL, 0.6), 2)
 	draw_crosshair(Vector2(PX + 28, y + 28), Rect2(PX + 8, y + 8, 40, 40))
-	draw_string(f8, Vector2(PX + 60, y + 22), "BULLSEYE  x" + str(C.CRIT_MULT), C.BULLSEYE_COL)
+	draw_string(f8, Vector2(PX + 60, y + 22), "BULLSEYE x" + str(C.CRIT_MULT), C.BULLSEYE_COL)
 	draw_string(f8, Vector2(PX + 60, y + 42), line1, C.TEXT_DIM)
