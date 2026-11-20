@@ -2,120 +2,303 @@ extends Node2D
 
 const C = preload("res://scripts/Constants.gd")
 const S = preload("res://scripts/Style.gd")
+const M = preload("res://scripts/Mods.gd")
+const SFX = preload("res://scripts/Sfx.gd")
+
+# local: this screen does not depend on any newer Constants.gd symbol
+const DEBUG_START_STAGE = 1
+const SOUND_DEFAULT = true
+const SFX_VOL = -8.0
+const SCAVENGER_COINS = 1
+const EVENT_KINDS = ["chest", "shop", "doors", "vending", "lostfound", "shrine"]
+
+const HELP_TEXT = "Each round the enemy flashes its plan, you move, then you throw a toy.\nThe flash happens once. Remember it.\nYour toy lands after it moves, so aim where it will end up.\n\nRED is the slide. Being there is fatal.\nORANGE is the blast. It costs health.\nGOLD is a bullseye. It hits much harder.\n\nThe pips under a toy are its shots. Empty it and it reloads.\nThe floor remembers: rust, glass and acid hurt. Foam and goo slow.\n\nThe bulb dashes twice. Crimson first, violet second.\nIt attacks from where the second dash ends.\n\nWASD or arrows to move, SPACE to confirm, ESC to step back.\n1-4 pick a toy, 0 stays put, H help, M sound, R restart."
 
 const SCREENS = {
-	"title": {"text": "RE:(do)(start)(call)", "button": "START", "next": "lore"},
-	"lore": {"text": "You ran. You cried.\nThen you opened your eyes... and nothing here was familiar.\n\nThe halls remember everything.\nKeep moving.", "button": "CONTINUE", "next": "ready"},
-	"ready": {"text": "BATTLE 1: THE RUSTED PIPE\n\nIt hunts you. Before every attack the danger flashes for a split second. Remember it, then move!\n\nRED X: where it slides. Touch it and it's over.\nORANGE: where it hits. It has TWO attacks:\n  RUST CHARGE (!): slides, then swings a long line.\n  SPIN SWEEP (*): slides, then spins and hits every tile around it.\n\nYou attack AFTER it moves, so aim where it will END UP.\nHit the gold + tile (the exact middle of your attack) for a BULLSEYE: x1.5 damage!", "button": "BEGIN", "next": "battle"},
-	"ready2": {"text": "BATTLE 2: THE MELTED HANGER\n\nIt slides in every direction, even diagonally.\nIts attacks are random and spread out across the floor.\nSticky goo slows you down.\n\nThe flash is longer, but there's more to remember.\nUse what you found!", "button": "BEGIN", "next": "battle2"},
-	"ready3": {"text": "BATTLE 3: THE CRUSHED LIGHTBULB\n\nIt moves TWICE. Two red X lines, one after the other.\nBOTH are lethal. Aim where it stops after the SECOND dash.\n\nThen the floor blows out where it lands:\n  SHATTER (#): a 3x3 blast of glass. It leaves shards behind.\n  SURGE (+): a huge cross of light, 2 tiles every way.\n\nBelow half HP it OVERLOADS: longer dashes, a wider surge.\nFoam darts still slow it - a slowed bulb only dashes 1 tile at a time.\nBroken glass cuts you if you stand on it. It does not slow you.\n\nThe flash is the longest you get. Don't blink.", "button": "BEGIN", "next": "battle3"},
-	"win": {"text": "YOU MADE IT THROUGH\n\nThe light goes out.\nThe hallway is just a hallway again.\n\nYou walk out.", "button": "CONTINUE", "next": "title"},
-	"gameover": {"text": "THE LOOP RESTARTS", "button": "TRY AGAIN", "next": "title"},
+    "title": {"text": "RE:(do)(start)(call)", "button": "START", "next": "lore"},
+    "lore": {"text": "You ran. You cried.\nThen you opened your eyes... and nothing here was familiar.\n\nThe halls remember everything.\nKeep moving.", "button": "CONTINUE", "next": "ready"},
+    "help": {"text": HELP_TEXT, "button": "BACK", "next": "title"},
+    "ready": {"text": "THE RUSTED PIPE\n\nIt hunts, and it remembers where you like to walk.\nIt slides down a line, then swings.\n\nAim where it will stop.", "button": "BEGIN", "next": "battle"},
+    "ready2": {"text": "THE MELTED HANGER\n\nIt slides in every direction and floods the floor.\nGoo slows you. Acid burns and slows.\n\nThe hit is survivable. Standing in the mess is not.", "button": "BEGIN", "next": "battle2"},
+    "ready3": {"text": "THE CRUSHED LIGHTBULB\n\nIt dashes twice, and both paths are lethal.\nCrimson first. Violet second.\n\nThe blast lands where the second dash ends.", "button": "BEGIN", "next": "battle3"},
+    "win": {"text": "YOU MADE IT THROUGH", "button": "CONTINUE", "next": "title"},
+    "gameover": {"text": "THE LOOP RESTARTS", "button": "TRY AGAIN", "next": "title"},
 }
 
 var current = null
-var run = {}      # carried between battles: hp, max_hp, coins, mods
-var stage = 1     # 1 = Rusted Pipe, 2 = Melted Hanger, 3 = Crushed Lightbulb
+var run = {}
+var stage = 1
+var sfx = null
+var sound_on = SOUND_DEFAULT
 
 
 func new_run():
-	run = {"hp": C.PLAYER_HP, "max_hp": C.PLAYER_HP, "coins": 0, "mods": []}
-	stage = int(clamp(C.DEBUG_START_STAGE, 1, 3))
-	if stage > 1:
-		run["coins"] = C.COIN_REWARD * (stage - 1)
+    run = {
+        "hp": C.PLAYER_HP, "max_hp": C.PLAYER_HP, "coins": 0, "mods": [],
+        "event_bag": [], "last_event": "", "events_seen": [], "rounds": 0,
+    }
+    stage = int(clamp(DEBUG_START_STAGE, 1, 3))
+    if stage > 1:
+        run["coins"] = C.COIN_REWARD * (stage - 1)
 
 
-# called by BattleScreen when you win: each battle leads to a random event,
-# the last one leads to the win screen
+func shuffle_array(a):
+    var i = a.size() - 1
+    while i > 0:
+        var j = randi() % (i + 1)
+        var tmp = a[i]
+        a[i] = a[j]
+        a[j] = tmp
+        i -= 1
+
+
+func next_event_kind():
+    if C.FORCE_ENCOUNTER != "":
+        return C.FORCE_ENCOUNTER
+    var bag = run.get("event_bag", [])
+    if bag.empty():
+        bag = EVENT_KINDS.duplicate()
+        shuffle_array(bag)
+        var last = run.get("last_event", "")
+        if last != "" and bag.size() > 1 and bag[0] == last:
+            var tmp = bag[0]
+            bag[0] = bag[1]
+            bag[1] = tmp
+    var kind = bag.pop_front()
+    run["event_bag"] = bag
+    run["last_event"] = kind
+    var seen = run.get("events_seen", [])
+    seen.append(kind)
+    run["events_seen"] = seen
+    return kind
+
+
+func set_sound(on):
+    sound_on = on
+    if sfx != null:
+        sfx.set_enabled(on)
+        if on:
+            sfx.play("ui")
+    if current != null and is_instance_valid(current):
+        current.update()
+
+
+func restart_run():
+    if sfx != null:
+        sfx.play("ui")
+    switch_to("title")
+
+
 func battle_won(hp):
-	run["hp"] = hp
-	if stage >= 3:
-		switch_to("win")
-		return
-	stage += 1
-	run["coins"] += C.COIN_REWARD
-	switch_to("encounter")
+    run["hp"] = hp
+    var reward = C.COIN_REWARD
+    if run["mods"].has("scavenger"):
+        reward += SCAVENGER_COINS
+    run["coins"] += reward
+    if stage >= 3:
+        switch_to("win")
+        return
+    stage += 1
+    switch_to("encounter")
 
 
 func _ready():
-	var bg = ColorRect.new()
-	bg.color = C.BG
-	bg.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
-	add_child(bg)
-	new_run()
-	switch_to("title")
+    randomize()
+    var bg = ColorRect.new()
+    bg.color = C.BG
+    bg.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
+    bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    add_child(bg)
+
+    sfx = SFX.new()
+    sfx.setup(self, sound_on, SFX_VOL)
+
+    new_run()
+    switch_to("title")
+
+
+func safe_theme():
+    var t = S.make_theme()
+    if t == null:
+        t = Theme.new()
+    return t
+
+
+func win_text():
+    var t = "YOU MADE IT THROUGH\n\nThe light goes out.\nThe hallway is just a hallway again.\n\n"
+    t += "Rounds: " + str(run.get("rounds", 0)) + "\n"
+    t += "Gear: " + str(run["mods"].size()) + "\n"
+    for id in run["mods"]:
+        t += "   " + M.name_of(id) + "\n"
+    t += "\nYou walk out."
+    return t
+
+
+# A failed script must never present as a black screen.
+func show_error(msg):
+    current = Control.new()
+    current.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
+    current.theme = safe_theme()
+    add_child(current)
+    var center = CenterContainer.new()
+    center.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
+    current.add_child(center)
+    var panel = PanelContainer.new()
+    panel.rect_min_size = Vector2(720, 0)
+    center.add_child(panel)
+    var box = VBoxContainer.new()
+    box.add_constant_override("separation", 22)
+    panel.add_child(box)
+    var l = Label.new()
+    l.text = "A SCRIPT FAILED TO LOAD\n\n" + msg + "\n\nCheck the Output panel for the parse error."
+    l.autowrap = true
+    l.rect_min_size = Vector2(660, 0)
+    l.add_color_override("font_color", C.CRUSH)
+    box.add_child(l)
+    var b = Button.new()
+    b.text = "BACK TO TITLE"
+    b.rect_min_size = Vector2(0, 46)
+    b.connect("pressed", self, "on_screen_button", ["title"])
+    box.add_child(b)
+
+
+func instance_screen(path):
+    var scr = load(path)
+    if scr == null:
+        show_error(path + " could not be loaded.")
+        return null
+    if not scr.can_instance():
+        show_error(path + " has a compile error.")
+        return null
+    var node = scr.new()
+    if node == null:
+        show_error(path + " could not be instanced.")
+        return null
+    return node
 
 
 func switch_to(screen_name):
-	if current != null:
-		current.queue_free()
+    if current != null and is_instance_valid(current):
+        current.queue_free()
+    current = null
 
-	if screen_name == "title":
-		new_run()
+    if screen_name == "title":
+        new_run()
 
-	# debug: jump straight to a later battle
-	if screen_name == "ready" and C.DEBUG_START_STAGE > 1:
-		if C.DEBUG_START_STAGE >= 3:
-			screen_name = "ready3"
-		else:
-			screen_name = "ready2"
+    if screen_name == "ready" and DEBUG_START_STAGE > 1:
+        if DEBUG_START_STAGE >= 3:
+            screen_name = "ready3"
+        else:
+            screen_name = "ready2"
 
-	if screen_name == "battle" or screen_name == "battle2" or screen_name == "battle3":
-		var battle = load("res://scripts/BattleScreen.gd").new()
-		if screen_name == "battle2":
-			battle.enemy_type = "hanger"
-		elif screen_name == "battle3":
-			battle.enemy_type = "bulb"
-		battle.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
-		battle.theme = S.make_theme()
-		add_child(battle)
-		current = battle
-		return
+    if screen_name == "battle" or screen_name == "battle2" or screen_name == "battle3":
+        var battle = instance_screen("res://scripts/BattleScreen.gd")
+        if battle == null:
+            return
+        if screen_name == "battle2":
+            battle.enemy_type = "hanger"
+        elif screen_name == "battle3":
+            battle.enemy_type = "bulb"
+        battle.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
+        battle.theme = safe_theme()
+        add_child(battle)
+        current = battle
+        return
 
-	if screen_name == "encounter":
-		var enc = load("res://scripts/EncounterScreen.gd").new()
-		enc.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
-		enc.theme = S.make_theme()
-		add_child(enc)
-		current = enc
-		return
+    if screen_name == "encounter":
+        var enc = instance_screen("res://scripts/EncounterScreen.gd")
+        if enc == null:
+            return
+        enc.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
+        enc.theme = safe_theme()
+        add_child(enc)
+        current = enc
+        return
 
-	var data = SCREENS[screen_name]
-	var width = 640
-	if screen_name == "ready" or screen_name == "ready2" or screen_name == "ready3":
-		width = 800
+    if not SCREENS.has(screen_name):
+        screen_name = "title"
+    var data = SCREENS[screen_name]
+    var width = 620
+    if screen_name == "ready" or screen_name == "ready2" or screen_name == "ready3":
+        width = 660
+    if screen_name == "win":
+        width = 660
+    if screen_name == "help":
+        width = 800
 
-	current = Control.new()
-	current.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
-	current.theme = S.make_theme()
-	add_child(current)
+    current = Control.new()
+    current.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
+    current.theme = safe_theme()
+    add_child(current)
 
-	var center = CenterContainer.new()
-	center.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
-	current.add_child(center)
+    var center = CenterContainer.new()
+    center.rect_size = Vector2(C.SCREEN_W, C.SCREEN_H)
+    current.add_child(center)
 
-	var panel = PanelContainer.new()
-	panel.rect_min_size = Vector2(width, 0)
-	center.add_child(panel)
+    var panel = PanelContainer.new()
+    panel.rect_min_size = Vector2(width, 0)
+    center.add_child(panel)
 
-	var box = VBoxContainer.new()
-	box.add_constant_override("separation", 28)
-	panel.add_child(box)
+    var box = VBoxContainer.new()
+    box.add_constant_override("separation", 26)
+    panel.add_child(box)
 
-	var label = Label.new()
-	label.text = data["text"]
-	label.align = Label.ALIGN_CENTER
-	label.autowrap = true
-	label.rect_min_size = Vector2(width - 56, 0)
-	if screen_name == "title":
-		label.add_font_override("font", S.make_font(24))
-	if screen_name == "ready" or screen_name == "ready2" or screen_name == "ready3":
-		label.align = Label.ALIGN_LEFT
-	box.add_child(label)
+    var label = Label.new()
+    if screen_name == "win":
+        label.text = win_text()
+    else:
+        label.text = data["text"]
+    label.align = Label.ALIGN_CENTER
+    label.autowrap = true
+    label.rect_min_size = Vector2(width - 60, 0)
+    if screen_name == "title":
+        var big = S.make_font(24)
+        if big != null:
+            label.add_font_override("font", big)
+    elif screen_name == "help":
+        var small = S.make_font(11)
+        if small != null:
+            label.add_font_override("font", small)
+    elif screen_name != "lore" and screen_name != "gameover":
+        var mid = S.make_font(13)
+        if mid != null:
+            label.add_font_override("font", mid)
+    if screen_name != "title" and screen_name != "lore" and screen_name != "gameover":
+        label.align = Label.ALIGN_LEFT
+    box.add_child(label)
 
-	var button = Button.new()
-	button.text = data["button"]
-	button.rect_min_size = Vector2(0, 48)
-	button.connect("pressed", self, "switch_to", [data["next"]])
-	box.add_child(button)
-	button.call_deferred("grab_focus")
+    var button = Button.new()
+    button.text = data["button"]
+    button.rect_min_size = Vector2(0, 46)
+    button.connect("pressed", self, "on_screen_button", [data["next"]])
+    box.add_child(button)
+    button.call_deferred("grab_focus")
+
+    if screen_name == "title":
+        var how = Button.new()
+        how.text = "HOW TO PLAY"
+        how.rect_min_size = Vector2(0, 40)
+        how.connect("pressed", self, "on_screen_button", ["help"])
+        box.add_child(how)
+
+        var snd = Button.new()
+        snd.text = "SOUND ON"
+        if not sound_on:
+            snd.text = "SOUND OFF"
+        snd.rect_min_size = Vector2(0, 40)
+        snd.connect("pressed", self, "toggle_sound_button", [snd])
+        box.add_child(snd)
+
+
+func on_screen_button(next):
+    if sfx != null:
+        sfx.play("ui")
+    switch_to(next)
+
+
+func toggle_sound_button(btn):
+    set_sound(not sound_on)
+    if sound_on:
+        btn.text = "SOUND ON"
+    else:
+        btn.text = "SOUND OFF"
